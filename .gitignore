@@ -1,0 +1,38 @@
+# Сырые данные — НИКОГДА не коммитить.
+# Содержат персональные данные студентов и преподавателей.
+data/raw/*
+!data/raw/.gitkeep
+
+# Соль для псевдонимизации — хранится отдельно от датасета
+*.salt
+secrets/
+
+# Промежуточные датасеты (могут быть тяжёлыми)
+data/processed/*.csv
+data/processed/*.parquet
+!data/processed/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# R
+.Rhistory
+.RData
+.Rproj.user/
+
+# LaTeX
+*.aux
+*.log
+*.out
+*.bbl
+*.blg
+*.synctex.gz
+*.toc
+
+# OS
+.DS_Store
+Thumbs.db
