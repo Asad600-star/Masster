@@ -36,3 +36,8 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+
+# Синтетика для отладки пайплайна — не результаты исследования
+data/synthetic/
+data/processed/features_synth.csv
+analysis/output/*_synthetic.csv
