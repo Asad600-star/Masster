@@ -19,6 +19,11 @@ import urllib.parse
 import urllib.request
 
 CROSSREF = "https://api.crossref.org/works/"
+CROSSREF_SEARCH = "https://api.crossref.org/works"
+# Реестр DOI целиком — покрывает и агентства, отличные от Crossref
+# (JaLC, DataCite, mEDRA). Нужен, чтобы не записать в "несуществующие"
+# запись, которая просто не депонирована в Crossref.
+DOI_RA = "https://doi.org/doiRA/"
 # Crossref просит контактный e-mail в User-Agent — с ним запросы идут
 # по "вежливому пулу" и работают заметно стабильнее.
 MAILTO = "aassddbbeekk8303@gmail.com"
@@ -73,11 +78,79 @@ def fetch(doi, retries=3):
     return None, "ERR_RETRIES"
 
 
+def registration_agency(doi):
+    """Кто зарегистрировал DOI. None — если DOI не существует вовсе.
+
+    Отсутствие записи в Crossref само по себе ничего не доказывает:
+    часть журналов регистрирует DOI в JaLC или mEDRA, и в Crossref API
+    их просто нет. Разделять эти два случая обязательно, иначе живой
+    источник попадёт в список "выдуманных"."""
+    try:
+        req = urllib.request.Request(DOI_RA + urllib.parse.quote(doi),
+                                     headers={"User-Agent": UA})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.load(resp)
+    except Exception:
+        return "UNKNOWN"
+    if not data or not isinstance(data, list):
+        return "UNKNOWN"
+    return data[0].get("RA") or None
+
+
+def search_by_title(ref, rows=3):
+    """Поиск записи по заглавию — чтобы поймать опечатку в DOI.
+
+    Возвращает список кандидатов; если заглавие совпадает почти дословно,
+    значит источник реален, а неверен именно DOI."""
+    query = re.sub(r"\s+", " ", ref["raw_title_venue"]).strip()
+    params = urllib.parse.urlencode({
+        "rows": rows,
+        "select": "DOI,title,container-title,issued,author",
+        "query.bibliographic": query,
+    })
+    try:
+        req = urllib.request.Request(f"{CROSSREF_SEARCH}?{params}",
+                                     headers={"User-Agent": UA})
+        with urllib.request.urlopen(req, timeout=40) as resp:
+            items = json.load(resp)["message"]["items"]
+    except Exception:
+        return []
+
+    out = []
+    for it in items:
+        title = (it.get("title") or [""])[0]
+        sim = best_title_match(title, ref["raw_title_venue"])
+        if sim >= TITLE_THRESHOLD:
+            out.append({
+                "doi": it.get("DOI"),
+                "title": title,
+                "container": (it.get("container-title") or [""])[0],
+                "year": (it.get("issued", {}).get("date-parts") or [[None]])[0][0],
+                "similarity": round(sim, 3),
+            })
+    return out
+
+
 def verify(ref):
     if not ref.get("doi"):
         return {**ref, "status": "NO_DOI"}
 
     msg, err = fetch(ref["doi"])
+
+    if err == "NOT_FOUND":
+        # Crossref не знает этот DOI. Прежде чем объявлять источник
+        # несуществующим, проверяем реестр DOI и ищем запись по заглавию.
+        ra = registration_agency(ref["doi"])
+        candidates = search_by_title(ref)
+        if ra and ra != "Crossref":
+            # DOI зарегистрирован, просто в другом агентстве.
+            return {**ref, "status": "NON_CROSSREF_RA", "doi_ra": ra}
+        if candidates:
+            # Источник существует, но DOI в библиографии указан неверно.
+            return {**ref, "status": "DOI_TYPO",
+                    "doi_ra": ra, "candidates": candidates}
+        return {**ref, "status": "NOT_FOUND", "doi_ra": ra}
+
     if err:
         return {**ref, "status": err}
 
@@ -132,11 +205,23 @@ def main():
     for status, n in sorted(counts.items(), key=lambda x: -x[1]):
         print(f"  {status:<16} {n}")
 
-    suspect = [r for r in results if r["status"] not in ("OK", "NO_DOI")]
+    # NON_CROSSREF_RA — не проблема: DOI зарегистрирован, просто вне Crossref.
+    ok_statuses = ("OK", "NO_DOI", "NON_CROSSREF_RA")
+    suspect = [r for r in results if r["status"] not in ok_statuses]
     if suspect:
         print(f"\nТребуют ручной проверки ({len(suspect)}):")
         for r in suspect:
             print(f"  [{r['id']}] {r['status']}: {r['raw_title_venue'][:80]}")
+            for c in r.get("candidates", []):
+                print(f"        возможно верный DOI: {c['doi']} "
+                      f"({c['year']}, sim={c['similarity']})")
+
+    missing = [r for r in results if r["status"] == "NOT_FOUND"]
+    if missing:
+        print(f"\nDOI не существует ни в одном агентстве ({len(missing)}) — "
+              f"кандидаты на удаление:")
+        for r in missing:
+            print(f"  [{r['id']}] {r['doi']}: {r['raw_title_venue'][:70]}")
 
     print(f"\nЗаписано: {args.output}")
     return 1 if suspect else 0
